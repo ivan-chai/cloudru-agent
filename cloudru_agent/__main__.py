@@ -1,14 +1,22 @@
 import argparse
 import os
 import time
+import logging
 
-import pwd
 import client_lib
+
+
+logger = logging.getLogger("main")
+logger.setLevel(logging.INFO)
+handler = logging.StreamHandler()
+handler.setLevel(logging.INFO)
+handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+logger.addHandler(handler)
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser("Start agent")
-    parser.add_argument("script", help="Path to a bash scripts with arguments.")
+    parser.add_argument("script", help="Path to a bash scripts with arguments.", nargs="+")
     parser.add_argument("--region", help="Cloud.ru region", required=True)
     parser.add_argument("--instance_type", help="Cloud.ru instance type", required=True)
     parser.add_argument("--base_image", help="Cloud.ru Docker image", required=True)
@@ -24,9 +32,9 @@ def parse_arguments():
 class JobRunner:
     def __init__(self, args):
         self.job_kwargs = {
-            "script": args.script,
+            "script": " ".join(args.script),
             "type": "binary",
-            "job_desc": args.job_desc or f"{pwd.getpwuid(os.getuid())}: agent ({args.script})",
+            "job_desc": args.job_desc or f"{os.environ['HOSTNAME']}: agent ({args.script})",
             "region": args.region,
             "instance_type": args.instance_type,
             "base_image": args.base_image
@@ -35,16 +43,32 @@ class JobRunner:
         self.retry_interval = args.cloud_retry_interval
 
     def run(self):
-        job = client_lib.Job(self.job_kwargs)
+        job = client_lib.Job(**self.job_kwargs)
         for _ in range(self.n_retries):
             try:
                 job.submit()
                 if job.status() != "Failed":
+                    logger.info(f"Started {job.job_name}")
                     return job
             except Exception as e:
-                print(e)
+                logger.error(str(e))
                 time.sleep(self.retry_interval)
         raise RuntimeError("Failed to run a job")
+
+
+def get_status(job, args):
+    n_retries = args.cloud_retries
+    retry_interval = args.cloud_retry_interval
+    for _ in range(n_retries):
+        try:
+            status = job.status()
+            if "=" not in status:
+                raise RuntimeError(f"Failed to get status for job {job.job_name}")
+            return status.split("=")[-1].strip().lower()
+        except Exception as e:
+            logger.warning(str(e))
+            time.sleep(self.retry_interval)
+    raise RuntimeError(f"Failed to get status for job {job.job_name}")
 
 
 def main(args):
@@ -55,15 +79,18 @@ def main(args):
     while True:
         # Parse return codes.
         for job in pool:
-            if job.status() == "Failed":
+            status = get_status(job, args)
+            if status == "failed":
+                logger.info(f"Failed {job.job_name}")
                 n_failed += 1
-            elif job.status() == "Completed":
+            elif status == "completed":
+                logger.info(f"Completed {job.job_name}")
                 n_failed = 0
         if n_failed >= args.max_failures:
             raise RuntimeError("The maximum number of failed jobs is reached")
         # Clean pool.
         pool = [job for job in pool
-                if job.status() not in {"Completed", "Failed"}]
+                if get_status(job, args) not in {"completed", "failed"}]
         # Run new jobs.
         if (len(pool) < args.parallel) and (n_runs < args.capacity):
             pool.append(runner.run())
@@ -71,7 +98,7 @@ def main(args):
         if (not pool) and (n_runs == args.capacity):
             break
         time.sleep(10)
-    print("Finished")
+    logger.info("Finished")
 
 
 if __name__ == "__main__":
