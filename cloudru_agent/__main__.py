@@ -67,7 +67,7 @@ def get_status(job, args):
             return status.split("=")[-1].strip().lower()
         except Exception as e:
             logger.warning(str(e))
-            time.sleep(self.retry_interval)
+            time.sleep(retry_interval)
     raise RuntimeError(f"Failed to get status for job {job.job_name}")
 
 
